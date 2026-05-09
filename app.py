@@ -10,6 +10,10 @@ import json
 import warnings
 import anthropic
 from dotenv import load_dotenv
+from tenacity import (
+    retry, stop_after_attempt, wait_exponential,
+    retry_if_exception, RetryError,
+)
 load_dotenv()
 
 SCOPES = [
@@ -141,6 +145,37 @@ def save_config(sources, pl_classifications=None):
     with open(CONFIG_FILE, "w") as f:
         json.dump(existing, f, indent=2)
 
+# ── Retry helpers ────────────────────────────────────────────────────────────
+def _is_google_transient(exc):
+    if isinstance(exc, gspread.exceptions.APIError):
+        resp = getattr(exc, "response", None)
+        if resp is not None:
+            return resp.status_code in (429, 500, 502, 503, 504)
+        return True
+    msg = str(exc).lower()
+    return any(k in msg for k in ("429", "quota", "rate limit", "timeout", "503", "502", "500"))
+
+def _is_anthropic_transient(exc):
+    return isinstance(exc, (
+        anthropic.RateLimitError,
+        anthropic.APIConnectionError,
+        anthropic.InternalServerError,
+    ))
+
+_google_retry = dict(
+    retry=retry_if_exception(_is_google_transient),
+    wait=wait_exponential(multiplier=1, min=2, max=60),
+    stop=stop_after_attempt(5),
+    reraise=True,
+)
+
+_anthropic_retry = dict(
+    retry=retry_if_exception(_is_anthropic_transient),
+    wait=wait_exponential(multiplier=1, min=3, max=60),
+    stop=stop_after_attempt(4),
+    reraise=True,
+)
+
 def build_gl_excel(df, acct_col, tb_col, display_cols):
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill, Alignment
@@ -223,6 +258,7 @@ def df_to_excel_bytes(df):
     return buf.getvalue()
 
 
+@retry(**_anthropic_retry)
 def generate_pl_summary(company_name: str, active_months: list, pl_rows: list) -> str:
     lines = [f"{company_name} — Income Statement"]
     for row in pl_rows:
@@ -312,6 +348,12 @@ def filter_rows(rows):
         return rows
     return [header] + [r for r in rows[1:] if r[idx].strip()]
 
+@retry(**_google_retry)
+def _fetch_sheet_values(creds, sheet_id, tab_name):
+    gc = gspread.authorize(creds)
+    return gc.open_by_key(sheet_id).worksheet(tab_name).get_all_values()
+
+@retry(**_google_retry)
 def read_sheet_rows(creds, sheet_id, tab_name):
     gc = gspread.authorize(creds)
     try:
@@ -339,6 +381,7 @@ def read_sheet_rows(creds, sheet_id, tab_name):
         df = df.loc[:, ~df.columns.str.startswith("Unnamed:")]
         return [df.columns.tolist()] + df.values.tolist()
 
+@retry(**_google_retry)
 def write_to_sheet(gc, output_sheet_id, output_tab, rows):
     out_sheet = gc.open_by_key(output_sheet_id)
     try:
@@ -539,10 +582,7 @@ elif page == "📒 General Ledger":
     # ── Load data ─────────────────────────────────────────────────────────────
     @st.cache_data(ttl=300, show_spinner="Loading data...")
     def load_output_tab(sheet_id, tab):
-        creds = get_creds()
-        gc = gspread.authorize(creds)
-        ws = gc.open_by_key(sheet_id).worksheet(tab)
-        return ws.get_all_values()
+        return _fetch_sheet_values(get_creds(), sheet_id, tab)
 
     try:
         raw = load_output_tab(selected_option["sheet_id"], selected_option["tab"])
@@ -656,10 +696,7 @@ elif page == "📊 Disbursement Summary":
     # ── Load data ─────────────────────────────────────────────────────────────
     @st.cache_data(ttl=300, show_spinner="Loading data...")
     def load_ds_tab(sheet_id, tab):
-        creds = get_creds()
-        gc = gspread.authorize(creds)
-        ws = gc.open_by_key(sheet_id).worksheet(tab)
-        return ws.get_all_values()
+        return _fetch_sheet_values(get_creds(), sheet_id, tab)
 
     try:
         raw = load_ds_tab(selected_option["sheet_id"], selected_option["tab"])
@@ -840,10 +877,7 @@ elif page == "📈 P&L Statement":
 
     @st.cache_data(ttl=300, show_spinner="Loading data...")
     def load_pl_tab(sheet_id, tab):
-        creds = get_creds()
-        gc = gspread.authorize(creds)
-        ws = gc.open_by_key(sheet_id).worksheet(tab)
-        return ws.get_all_values()
+        return _fetch_sheet_values(get_creds(), sheet_id, tab)
 
     try:
         raw = load_pl_tab(selected_option["sheet_id"], selected_option["tab"])

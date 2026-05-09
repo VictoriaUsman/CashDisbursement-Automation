@@ -141,6 +141,88 @@ def save_config(sources, pl_classifications=None):
     with open(CONFIG_FILE, "w") as f:
         json.dump(existing, f, indent=2)
 
+def build_gl_excel(df, acct_col, tb_col, display_cols):
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment
+    from openpyxl.utils import get_column_letter
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "General Ledger"
+
+    navy_fill   = PatternFill("solid", fgColor="1E3A5F")
+    navy_font   = Font(color="FFFFFF", bold=True)
+    acct_fill   = PatternFill("solid", fgColor="E8EEF7")
+    acct_font   = Font(bold=True)
+    sub_fill    = PatternFill("solid", fgColor="D0E8FF")
+    sub_font    = Font(bold=True)
+    right_align = Alignment(horizontal="right")
+
+    all_cols = [acct_col] + display_cols
+
+    # Column headers
+    for ci, h in enumerate(all_cols, 1):
+        cell = ws.cell(row=1, column=ci, value=h)
+        cell.font = navy_font
+        cell.fill = navy_fill
+        cell.alignment = Alignment(horizontal="center")
+
+    r = 2
+    for acct_title, group in df.groupby(acct_col, sort=True):
+        # Account title header row
+        cell = ws.cell(row=r, column=1, value=acct_title)
+        cell.font = acct_font
+        cell.fill = acct_fill
+        for ci in range(2, len(all_cols) + 1):
+            ws.cell(row=r, column=ci).fill = acct_fill
+        r += 1
+
+        # Detail rows
+        for _, data_row in group[display_cols].iterrows():
+            ws.cell(row=r, column=1, value="")
+            for ci, col in enumerate(display_cols, 2):
+                val = data_row[col]
+                try:
+                    val = float(str(val).replace(",", "").strip())
+                except (ValueError, AttributeError):
+                    pass
+                c = ws.cell(row=r, column=ci, value=val)
+                if isinstance(val, float):
+                    c.alignment = right_align
+                    c.number_format = '#,##0.00'
+            r += 1
+
+        # Subtotal row
+        subtotal = group[tb_col].sum()
+        lbl = ws.cell(row=r, column=1, value="Subtotal")
+        lbl.font = sub_font
+        lbl.fill = sub_fill
+        tb_ci = all_cols.index(tb_col) + 1
+        for ci in range(1, len(all_cols) + 1):
+            c = ws.cell(row=r, column=ci)
+            c.fill = sub_fill
+            if ci == tb_ci:
+                c.value = subtotal
+                c.font = sub_font
+                c.alignment = right_align
+                c.number_format = '#,##0.00'
+        r += 2  # blank row between accounts
+
+    for ci in range(1, len(all_cols) + 1):
+        ws.column_dimensions[get_column_letter(ci)].width = 22
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def df_to_excel_bytes(df):
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False)
+    return buf.getvalue()
+
+
 def generate_pl_summary(company_name: str, active_months: list, pl_rows: list) -> str:
     lines = [f"{company_name} — Income Statement"]
     for row in pl_rows:
@@ -497,8 +579,9 @@ elif page == "📒 General Ledger":
         errors="coerce"
     ).fillna(0)
 
-    # Remove blank account title rows
+    # Remove blank account title rows and zero TB rows
     df = df[df[acct_col].str.strip() != ""]
+    df = df[df[tb_col] != 0]
     df[acct_col] = df[acct_col].str.replace(r"[\r\n]+", " ", regex=True).str.strip()
 
     # Sort by account title then by month order
@@ -510,17 +593,17 @@ elif page == "📒 General Ledger":
     month_label = ", ".join(selected_months) if selected_months else "All Months"
     total_tb    = df[tb_col].sum()
 
+    display_cols = [c for c in df.columns if c != acct_col]
+
     col_title, col_dl = st.columns([3, 1])
     col_title.subheader(f"{selected_tab_label}  ·  {month_label}  ·  {len(df):,} entries")
     col_dl.download_button(
-        label="⬇️ Download CSV",
-        data=df.to_csv(index=False).encode("utf-8"),
-        file_name=f"general_ledger_{selected_tab_label}_{month_label}.csv",
-        mime="text/csv",
+        label="⬇️ Download Excel",
+        data=build_gl_excel(df, acct_col, tb_col, display_cols),
+        file_name=f"general_ledger_{selected_tab_label}_{month_label}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True,
     )
-
-    display_cols = [c for c in df.columns if c != acct_col]
 
     for acct_title, group in df.groupby(acct_col, sort=True):
         st.markdown(f"**{acct_title}**")
@@ -680,10 +763,10 @@ elif page == "📊 Disbursement Summary":
 
     # ── Download ──────────────────────────────────────────────────────────────
     col_dl.download_button(
-        "⬇️ Download CSV",
-        data=result_df.to_csv(index=False).encode("utf-8"),
-        file_name=f"disbursement_summary_{selected_label}.csv",
-        mime="text/csv",
+        "⬇️ Download Excel",
+        data=df_to_excel_bytes(result_df),
+        file_name=f"disbursement_summary_{selected_label}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True,
     )
 
@@ -880,10 +963,10 @@ elif page == "📈 P&L Statement":
     dl_df = pd.DataFrame([{k: v for k, v in r.items() if k not in ("is_header", "is_calc")}
                            for r in pl_rows])
     col_dl.download_button(
-        "⬇️ Download CSV",
-        data=dl_df.to_csv(index=False).encode("utf-8"),
-        file_name=f"pl_{selected_label}.csv",
-        mime="text/csv",
+        "⬇️ Download Excel",
+        data=df_to_excel_bytes(dl_df),
+        file_name=f"pl_{selected_label}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True,
     )
 

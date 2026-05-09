@@ -23,7 +23,7 @@ gcloud run deploy $SERVICE \
   --platform managed \
   --region $REGION \
   --allow-unauthenticated \
-  --set-secrets="SERVICE_ACCOUNT_JSON=service-account-json:latest" \
+  --set-secrets="SERVICE_ACCOUNT_JSON=service-account-json:latest,ANTHROPIC_API_KEY=anthropic-api-key:latest" \
   --port 8080 \
   --project=$PROJECT_ID
 

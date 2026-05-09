@@ -8,6 +8,9 @@ import io
 import os
 import json
 import warnings
+import anthropic
+from dotenv import load_dotenv
+load_dotenv()
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -137,6 +140,30 @@ def save_config(sources, pl_classifications=None):
         existing["pl_classifications"] = pl_classifications
     with open(CONFIG_FILE, "w") as f:
         json.dump(existing, f, indent=2)
+
+def generate_pl_summary(company_name: str, active_months: list, pl_rows: list) -> str:
+    lines = [f"{company_name} — Income Statement"]
+    for row in pl_rows:
+        month_vals = {m: row.get(m, "-") for m in active_months}
+        ye = row.get("As at Year-end", "-")
+        lines.append(f"{row['label']}: {', '.join(f'{m[:3]}={v}' for m, v in month_vals.items())}  |  Year-end: {ye}")
+    text = "\n".join(lines)
+
+    client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+    message = client.messages.create(
+        model="claude-opus-4-7",
+        max_tokens=300,
+        messages=[{
+            "role": "user",
+            "content": (
+                f"You are a financial analyst. Based on the following P&L statement data, "
+                f"write exactly 3 concise sentences summarizing the company's financial performance. "
+                f"Focus on revenue, profitability, and any notable trends.\n\n{text}"
+            ),
+        }],
+    )
+    return message.content[0].text
+
 
 # ── Page config ──────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Cash Disbursement", page_icon="💸", layout="wide")
@@ -895,3 +922,17 @@ elif page == "📈 P&L Statement":
     </table>
     """
     st.markdown(pl_html, unsafe_allow_html=True)
+
+    # ── AI Summary ────────────────────────────────────────────────────────────
+    st.divider()
+    has_api_key = bool(os.environ.get("ANTHROPIC_API_KEY"))
+    if not has_api_key:
+        st.info("Set the `ANTHROPIC_API_KEY` environment variable to enable AI summaries.")
+    else:
+        if st.button("✨ Generate AI Summary", type="primary"):
+            with st.spinner("Generating summary..."):
+                try:
+                    summary = generate_pl_summary(company_name, active_months, pl_rows)
+                    st.info(summary)
+                except Exception as e:
+                    st.error(f"Could not generate summary: {e}")

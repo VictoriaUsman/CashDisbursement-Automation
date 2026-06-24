@@ -1,4 +1,5 @@
 import streamlit as st
+import altair as alt
 import gspread
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
@@ -110,6 +111,37 @@ ACCOUNT_TAGS: dict[str, str] = {
     "TRAVEL, TRANSPORTATION AND ACCOMODAITION EXPENSE":  "OPEX",
 }
 
+SEED_DATA: dict[str, dict[str, float]] = {
+    "DAVAO": {
+        "January": 2_850_450, "February": 2_340_200, "March": 2_680_750,
+        "April": 3_120_300, "May": 2_950_600, "June": 3_280_900,
+        "July": 2_760_100, "August": 3_050_400, "September": 2_890_700,
+        "October": 3_180_200, "November": 3_420_500, "December": 3_760_800,
+    },
+    "CEBU": {
+        "January": 1_920_300, "February": 1_640_800, "March": 1_880_450,
+        "April": 2_150_100, "May": 1_990_700, "June": 2_230_600,
+        "July": 1_850_200, "August": 2_080_900, "September": 1_960_400,
+        "October": 2_210_300, "November": 2_390_700, "December": 2_580_100,
+    },
+    "MANILA": {
+        "January": 3_450_600, "February": 2_980_100, "March": 3_210_800,
+        "April": 3_680_400, "May": 3_420_900, "June": 3_850_200,
+        "July": 3_290_700, "August": 3_610_300, "September": 3_440_800,
+        "October": 3_720_100, "November": 3_980_600, "December": 4_260_900,
+    },
+    "CAGAYAN DE ORO": {
+        "January": 980_200, "February": 820_450, "March": 960_700,
+        "April": 1_120_300, "May": 1_040_800, "June": 1_180_100,
+        "July": 950_600, "August": 1_080_400, "September": 1_020_900,
+        "October": 1_140_200, "November": 1_250_700, "December": 1_380_300,
+    },
+}
+
+SEED_TOTAL_SOURCES = 21
+SEED_VALID_SOURCES = 21
+SEED_SHEET_COUNTS  = {"DAVAO": 7, "CEBU": 5, "MANILA": 6, "CAGAYAN DE ORO": 3}
+
 DEFAULT_SOURCES = [
     {
         "label": "DAVAO",
@@ -117,7 +149,28 @@ DEFAULT_SOURCES = [
         "tab": "DAVAO Cash Disbursement",
         "output_sheet_id": "178dBRrrsME9IB_kDtlG7QasGsz-A9x2H2hsygr0ZXZ8",
         "output_tab": "DAVAO",
-    }
+    },
+    {
+        "label": "CEBU",
+        "sheet_id": "",
+        "tab": "CEBU Cash Disbursement",
+        "output_sheet_id": "",
+        "output_tab": "CEBU",
+    },
+    {
+        "label": "MANILA",
+        "sheet_id": "",
+        "tab": "MANILA Cash Disbursement",
+        "output_sheet_id": "",
+        "output_tab": "MANILA",
+    },
+    {
+        "label": "CAGAYAN DE ORO",
+        "sheet_id": "",
+        "tab": "CDO Cash Disbursement",
+        "output_sheet_id": "",
+        "output_tab": "CAGAYAN DE ORO",
+    },
 ]
 
 # ── Config persistence ───────────────────────────────────────────────────────
@@ -296,7 +349,7 @@ if "output_urls"        not in st.session_state: st.session_state.output_urls = 
 # ── Sidebar ──────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.title("💸 Cash Disbursement")
-    page = st.radio("Navigation", ["📋 Consolidation", "📒 General Ledger", "📊 Disbursement Summary", "📈 P&L Statement"], label_visibility="collapsed")
+    page = st.radio("Navigation", ["🏠 Dashboard", "📋 Consolidation", "📒 General Ledger", "📊 Disbursement Summary", "📈 P&L Statement"], label_visibility="collapsed")
     st.divider()
 
     # Credentials
@@ -394,9 +447,194 @@ def write_to_sheet(gc, output_sheet_id, output_tab, rows):
     return f"https://docs.google.com/spreadsheets/d/{output_sheet_id}"
 
 # ════════════════════════════════════════════════════════════════════════════
+# PAGE: DASHBOARD
+# ════════════════════════════════════════════════════════════════════════════
+if page == "🏠 Dashboard":
+    st.title("🏠 Dashboard")
+
+    sources       = st.session_state.sources
+    valid_sources = [s for s in sources if s.get("sheet_id") and s.get("tab")]
+    unique_companies = list(dict.fromkeys(
+        s["output_tab"] for s in sources if s.get("output_tab")
+    ))
+
+    # ── Metric cards ──────────────────────────────────────────────────────────
+    using_seed_metrics = not sources
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Total Source Sheets",      SEED_TOTAL_SOURCES if using_seed_metrics else len(sources))
+    m2.metric("Files Being Consolidated", SEED_VALID_SOURCES if using_seed_metrics else len(valid_sources))
+    m3.metric("Number of Companies",      len(SEED_DATA)     if using_seed_metrics else len(unique_companies))
+
+    st.divider()
+
+    # ── Load real data, fall back to seed ─────────────────────────────────────
+    @st.cache_data(ttl=300, show_spinner=False)
+    def load_dashboard_tab(sheet_id, tab):
+        return _fetch_sheet_values(get_creds(), sheet_id, tab)
+
+    company_monthly: dict[str, dict[str, float]] = {}
+    using_seed_for: list[str] = []
+
+    if sa_valid and unique_companies:
+        seen_keys: set = set()
+        for src in sources:
+            key = (src.get("output_sheet_id", ""), src.get("output_tab", ""))
+            if not key[0] or not key[1] or key in seen_keys:
+                continue
+            seen_keys.add(key)
+            try:
+                raw = load_dashboard_tab(key[0], key[1])
+                if raw and len(raw) > 1:
+                    df_d = pd.DataFrame(raw[1:], columns=[h.strip() for h in raw[0]])
+                    cl = {c.lower(): c for c in df_d.columns}
+                    mc, tc = cl.get("month"), cl.get("tb amount")
+                    if mc and tc:
+                        df_d[tc] = pd.to_numeric(
+                            df_d[tc].astype(str).str.replace(",", "").str.strip(),
+                            errors="coerce",
+                        ).fillna(0)
+                        company_monthly[key[1]] = df_d.groupby(mc)[tc].sum().to_dict()
+            except Exception:
+                pass
+
+    for company, monthly in SEED_DATA.items():
+        if company not in company_monthly:
+            company_monthly[company] = monthly
+            using_seed_for.append(company)
+
+    if using_seed_for:
+        st.info(
+            f"Showing sample data for: **{', '.join(using_seed_for)}**. "
+            "Configure sources on the Consolidation page to replace with real data."
+        )
+
+    # ── Build chart data ───────────────────────────────────────────────────────
+    active_months = [m for m in MONTHS if any(m in d for d in company_monthly.values())]
+
+    totals = {c: sum(v.get(m, 0) for m in MONTHS) for c, v in company_monthly.items()}
+
+    line_df = pd.DataFrame(
+        {c: [v.get(m, 0) for m in active_months] for c, v in company_monthly.items()},
+        index=active_months,
+    )
+
+    # ── Charts ─────────────────────────────────────────────────────────────────
+    col_bar, col_line = st.columns(2)
+
+    with col_bar:
+        st.subheader("Total Disbursement per Company")
+        bar_data = pd.DataFrame([
+            {"Company": c, "Amount": v} for c, v in totals.items()
+        ])
+        bar_chart = (
+            alt.Chart(bar_data)
+            .mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4)
+            .encode(
+                x=alt.X("Company:N", sort="-y", axis=alt.Axis(labelAngle=0, title=None)),
+                y=alt.Y(
+                    "Amount:Q",
+                    axis=alt.Axis(
+                        labelExpr="'₱' + format(datum.value / 1000000, ',.2f') + 'M'",
+                        title="Total Disbursement (₱)",
+                    ),
+                ),
+                color=alt.Color("Company:N", legend=None),
+                tooltip=[
+                    alt.Tooltip("Company:N", title="Company"),
+                    alt.Tooltip("Amount:Q", format=",.2f", title="Amount (₱)"),
+                ],
+            )
+            .properties(height=320)
+        )
+        st.altair_chart(bar_chart, use_container_width=True)
+
+    with col_line:
+        st.subheader("Monthly Disbursement Trend")
+        line_long = (
+            line_df.reset_index()
+            .melt(id_vars="index", var_name="Company", value_name="Amount")
+            .rename(columns={"index": "Month"})
+        )
+        month_order = {m: i for i, m in enumerate(MONTHS)}
+        line_long["_order"] = line_long["Month"].map(month_order)
+        line_long = line_long.sort_values("_order")
+
+        line_chart = (
+            alt.Chart(line_long)
+            .mark_line(point=True)
+            .encode(
+                x=alt.X(
+                    "Month:O",
+                    sort=active_months,
+                    axis=alt.Axis(labelAngle=-30, title=None),
+                ),
+                y=alt.Y(
+                    "Amount:Q",
+                    axis=alt.Axis(
+                        labelExpr="'₱' + format(datum.value / 1000000, ',.2f') + 'M'",
+                        title="Disbursement (₱)",
+                    ),
+                ),
+                color=alt.Color("Company:N"),
+                tooltip=[
+                    alt.Tooltip("Month:O",   title="Month"),
+                    alt.Tooltip("Company:N", title="Company"),
+                    alt.Tooltip("Amount:Q",  format=",.2f", title="Amount (₱)"),
+                ],
+            )
+            .properties(height=320)
+        )
+        st.altair_chart(line_chart, use_container_width=True)
+
+    # ── Pie chart ──────────────────────────────────────────────────────────────
+    st.divider()
+
+    if using_seed_metrics:
+        sheet_counts = SEED_SHEET_COUNTS
+    else:
+        sheet_counts: dict[str, int] = {}
+        for src in sources:
+            company = src.get("output_tab", "")
+            if company:
+                sheet_counts[company] = sheet_counts.get(company, 0) + 1
+
+    total_sheets = sum(sheet_counts.values()) or 1
+    pie_data = pd.DataFrame([
+        {
+            "Company": c,
+            "Sheets":  v,
+            "Label":   f"{v} sheets ({v / total_sheets * 100:.1f}%)",
+        }
+        for c, v in sheet_counts.items()
+    ])
+
+    base = alt.Chart(pie_data).encode(
+        theta=alt.Theta("Sheets:Q", stack=True),
+        color=alt.Color("Company:N", legend=alt.Legend(orient="right", title=None)),
+        tooltip=[
+            alt.Tooltip("Company:N", title="Company"),
+            alt.Tooltip("Sheets:Q",  title="Number of Sheets"),
+            alt.Tooltip("Label:N",   title="Share"),
+        ],
+    )
+    pie_arc  = base.mark_arc(outerRadius=130)
+    pie_text = base.mark_text(radius=158, size=13, fontWeight="bold").encode(
+        text="Sheets:Q",
+    )
+
+    _, pie_col, _ = st.columns([1, 2, 1])
+    with pie_col:
+        st.subheader("Source Sheets per Company")
+        st.altair_chart(
+            (pie_arc + pie_text).properties(height=380),
+            use_container_width=True,
+        )
+
+
+# ════════════════════════════════════════════════════════════════════════════
 # PAGE: CONSOLIDATION
 # ════════════════════════════════════════════════════════════════════════════
-if page == "📋 Consolidation":
+elif page == "📋 Consolidation":
     st.title("📋 Consolidation")
     st.caption("Extract cash disbursement entries from multiple Google Sheets into one consolidated sheet.")
 

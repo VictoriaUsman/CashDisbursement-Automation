@@ -1,6 +1,19 @@
 # Cash Disbursement Consolidator
 
-Extracts cash disbursement entries from one or more Google Sheets and writes them into a consolidated Google Sheet. Includes a General Ledger tab with SUMIF formulas. Runs as a Streamlit web app, deployable locally or on Google Cloud Run.
+A Streamlit web app that pulls cash disbursement entries from one or more Google Sheets, consolidates them, and presents them across five views: Dashboard, Consolidation, General Ledger, Disbursement Summary, and P&L Statement. Includes Claude AI-generated P&L narratives and Excel export on every page.
+
+---
+
+## Quick Start
+
+```bash
+pip install -r requirements.txt
+streamlit run app.py
+```
+
+Opens at `http://localhost:8501`.
+
+> Requires `service_account.json` in the project folder and a `.env` file with your `ANTHROPIC_API_KEY`. See **Local Setup** below.
 
 ---
 
@@ -22,7 +35,7 @@ Extracts cash disbursement entries from one or more Google Sheets and writes the
 4. Navigate to **IAM & Admin → Service Accounts → Create Service Account**
 5. Download the JSON key and save it as `service_account.json` in this folder
 
-> ⚠️ Never commit `service_account.json` to git — it is in `.gitignore`
+> Never commit `service_account.json` to git — it is in `.gitignore`
 
 ### 2. Share Sheets with the Service Account
 
@@ -38,7 +51,7 @@ Create a `.env` file in this folder:
 ANTHROPIC_API_KEY=sk-ant-api03-your-key-here
 ```
 
-> ⚠️ Never commit `.env` to git — it is in `.gitignore`
+> Never commit `.env` to git — it is in `.gitignore`
 
 ### 4. Install Dependencies
 
@@ -51,8 +64,6 @@ pip install -r requirements.txt
 ```bash
 streamlit run app.py
 ```
-
-Opens at `http://localhost:8501`.
 
 ---
 
@@ -97,8 +108,8 @@ gcloud secrets create service-account-json \
 # Anthropic API key
 echo -n "sk-ant-api03-your-key-here" | \
   gcloud secrets create anthropic-api-key \
-  --data-file=- \
-  --project=consolidation-495808
+    --data-file=- \
+    --project=consolidation-495808
 ```
 
 `deploy.sh` will update these secrets automatically on subsequent deploys.
@@ -118,9 +129,19 @@ echo -n "sk-ant-api03-your-key-here" | \
 
 ## UI Overview
 
+### Navigation Pages
+
+| Page | Description |
+|---|---|
+| **🏠 Dashboard** | KPI cards, bar chart, line chart, and pie chart across all companies |
+| **📋 Consolidation** | Configure sources, preview data, run consolidation |
+| **📒 General Ledger** | Per-account breakdown with subtotals; filter by month; download Excel |
+| **📊 Disbursement Summary** | Pivot table with months as columns, accounts grouped by COS/OPEX/OTHER; download Excel |
+| **📈 P&L Statement** | Income statement with revenues, COS, gross profit, OPEX, net income; AI summary button; download Excel |
+
 ### Source Sheets Table
 
-Each row represents one source-to-output mapping:
+Each row on the Consolidation page represents one source-to-output mapping:
 
 | Field | Description |
 |---|---|
@@ -138,21 +159,12 @@ Each row represents one source-to-output mapping:
 
 Sources sharing the same **Output Sheet ID + Output Tab** are consolidated into one tab with a shared header row.
 
-### Navigation Pages
-
-| Page | Description |
-|---|---|
-| **📋 Consolidation** | Configure sources, preview data, run consolidation |
-| **📒 General Ledger** | Per-account breakdown with subtotals; filter by month; download Excel |
-| **📊 Disbursement Summary** | Pivot table with months as columns, accounts grouped by COS/OPEX/OTHER; download Excel |
-| **📈 P&L Statement** | Income statement with revenues, COS, gross profit, OPEX, net income; AI summary button; download Excel |
-
 ### Buttons
 
 | Button | Action |
 |---|---|
 | **🔍 Preview Data** | Fetches all source data and displays a table — no writes |
-| **🚀 Run Consolidation** | Reads, filters, writes consolidated tabs |
+| **🚀 Run Consolidation** | Reads, filters, and writes consolidated tabs |
 | **⬇️ Download Excel** | Downloads the current page's data as a formatted `.xlsx` file |
 | **✨ Generate AI Summary** | Uses Claude API to generate a 3-sentence P&L narrative (P&L page only) |
 
@@ -163,6 +175,25 @@ Rows where **Amount Paid** is blank are automatically excluded. In the General L
 ### Account Classification
 
 Accounts are classified into **COS**, **OPEX**, and **SALES** using a hardcoded `ACCOUNT_TAGS` dictionary in `app.py`. Use the **⚙️ Account Classification Override** expander on the P&L page to add accounts not covered by the hardcoded list. Overrides are saved to `config.json`.
+
+### Dashboard
+
+The Dashboard is the default landing page and gives a company-wide overview:
+
+| Widget | Description |
+|---|---|
+| **Total Source Sheets** | Count of configured source entries |
+| **Files Being Consolidated** | Count of sources with both Sheet ID and Tab filled in |
+| **Number of Companies** | Count of unique output tabs (companies) |
+| **Bar chart** | Total disbursement per company (₱, year-to-date), sorted largest first |
+| **Line chart** | Monthly disbursement trend per company (₱) |
+| **Pie chart** | Share of source sheets per company |
+
+**Sample data** — when no sources are configured the dashboard renders built-in seed data for four companies (DAVAO, CEBU, MANILA, CAGAYAN DE ORO) so the charts are always populated. An info banner identifies which companies are using sample data. Replace them with real sources on the Consolidation page to see live figures.
+
+### Retry & Rate Limiting
+
+All Google Sheets and Google Drive API calls retry automatically on transient errors (429, 500–504) with exponential backoff — up to 5 attempts. Anthropic API calls retry up to 4 times on rate limit or connection errors.
 
 ---
 
@@ -177,7 +208,7 @@ https://docs.google.com/spreadsheets/d/<SHEET_ID>/edit
 ## File Structure
 
 ```
-Accounting/
+CashDisbursement-Automation/
 ├── app.py                # Streamlit web UI
 ├── consolidate.py        # Headless CLI script (legacy)
 ├── config.json           # Saved sheet configuration (auto-generated, safe to commit)
